@@ -7,7 +7,7 @@
   "author": "Ahmad",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AhmadMayo/pi-hybrid-context"
+    "url": "https://github.com/ahmadaccino/pi-hybrid-context"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",

@@ -14,13 +14,13 @@ Anthropic's latest models (Claude Opus 4.6, Claude Sonnet 4.6) support 1M token 
 ## Install
 
 ```bash
-pi install git:github.com/AhmadMayo/pi-hybrid-context
+pi install git:github.com/ahmadaccino/pi-hybrid-context
 ```
 
 Or try it without installing:
 
 ```bash
-pi -e git:github.com/AhmadMayo/pi-hybrid-context
+pi -e git:github.com/ahmadaccino/pi-hybrid-context
 ```
 
 ## How It Works
