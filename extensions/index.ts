@@ -1,30 +1,31 @@
 /**
  * Hybrid Context Extension for pi
  *
- * Starts on a standard context-window Anthropic model (200k tokens) for speed
- * and cost savings, then automatically switches to the 1M context-window variant
- * when context usage reaches a configurable threshold (default: 90%).
+ * Gives you the best of both worlds: start on a fast, cheap 200k context model,
+ * then auto-switch to the 1M context variant when you actually need the space.
+ *
+ * Works both ways:
+ *   - Select a 200k model  →  monitors usage, switches to 1M at threshold
+ *   - Select a 1M model    →  immediately drops to 200k base, switches back at threshold
  *
  * This is a one-way escalation per session — once switched to 1M, it stays there.
  *
- * Supported model pairs:
+ * Supported model families:
  *
  *   Anthropic direct API:
- *     claude-sonnet-4-5  →  claude-sonnet-4-6
- *     claude-opus-4-5    →  claude-opus-4-6
+ *     claude-sonnet-4-5  ↔  claude-sonnet-4-6
+ *     claude-opus-4-5    ↔  claude-opus-4-6
  *
- *   AWS Bedrock (all region prefixes):
- *     anthropic.claude-sonnet-4-5-*  →  anthropic.claude-sonnet-4-6
- *     anthropic.claude-opus-4-5-*    →  anthropic.claude-opus-4-6-v1
- *     us.anthropic.claude-sonnet-4-5-*  →  us.anthropic.claude-sonnet-4-6
- *     us.anthropic.claude-opus-4-5-*    →  us.anthropic.claude-opus-4-6-v1
- *     eu.anthropic.claude-sonnet-4-5-*  →  eu.anthropic.claude-sonnet-4-6
- *     eu.anthropic.claude-opus-4-5-*    →  eu.anthropic.claude-opus-4-6-v1
- *     global.anthropic.claude-sonnet-4-5-*  →  global.anthropic.claude-sonnet-4-6
- *     global.anthropic.claude-opus-4-5-*    →  global.anthropic.claude-opus-4-6-v1
+ *   AWS Bedrock (all region prefixes: bare, us., eu., global.):
+ *     anthropic.claude-sonnet-4-5-*  ↔  anthropic.claude-sonnet-4-6
+ *     anthropic.claude-opus-4-5-*    ↔  anthropic.claude-opus-4-6-v1
+ *
+ *   OpenRouter:
+ *     anthropic/claude-sonnet-4.5  ↔  anthropic/claude-sonnet-4.6
+ *     anthropic/claude-opus-4.5    ↔  anthropic/claude-opus-4.6
  *
  * Usage:
- *   pi install git:github.com/AhmadMayo/pi-hybrid-context
+ *   pi install git:github.com/ahmadaccino/pi-hybrid-context
  *   pi -e ./path/to/pi-hybrid-context
  *
  * The extension activates automatically when you select a supported model.
@@ -38,80 +39,74 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 // ---------------------------------------------------------------------------
 
 interface ModelPair {
-	/** Pattern to match the base model ID (supports startsWith matching) */
-	basePattern: string;
-	/** Exact model ID of the 1M context variant */
-	targetId: string;
+	/** The smaller context-window model ID (e.g. 200k) */
+	baseId: string;
+	/** The 1M context-window model ID */
+	largeId: string;
 	/** Provider name */
 	provider: string;
 }
 
 /**
  * Build the full model pair table.
- * For each family (sonnet-4-5 → sonnet-4-6, opus-4-5 → opus-4-6) we generate
- * entries for direct Anthropic API and all Bedrock region prefixes.
+ * Each entry maps a base (200k) model ↔ large (1M) model within the same provider.
  */
 function buildModelPairs(): ModelPair[] {
 	const pairs: ModelPair[] = [];
 
 	// --- Anthropic direct API ---
-	const anthropicFamilies: Array<{ base: string; target: string }> = [
+	const anthropicPairs: Array<{ base: string; large: string }> = [
 		// Aliases (latest pointers)
-		{ base: "claude-sonnet-4-5", target: "claude-sonnet-4-6" },
-		{ base: "claude-opus-4-5", target: "claude-opus-4-6" },
+		{ base: "claude-sonnet-4-5", large: "claude-sonnet-4-6" },
+		{ base: "claude-opus-4-5", large: "claude-opus-4-6" },
 		// Dated versions
-		{ base: "claude-sonnet-4-5-20250929", target: "claude-sonnet-4-6" },
-		{ base: "claude-opus-4-5-20251101", target: "claude-opus-4-6" },
-		// Older models that also have 200k context
-		{ base: "claude-sonnet-4-20250514", target: "claude-sonnet-4-6" },
-		{ base: "claude-opus-4-20250514", target: "claude-opus-4-6" },
-		{ base: "claude-opus-4-1-20250805", target: "claude-opus-4-6" },
-		{ base: "claude-sonnet-4-0", target: "claude-sonnet-4-6" },
-		{ base: "claude-opus-4-0", target: "claude-opus-4-6" },
-		{ base: "claude-opus-4-1", target: "claude-opus-4-6" },
+		{ base: "claude-sonnet-4-5-20250929", large: "claude-sonnet-4-6" },
+		{ base: "claude-opus-4-5-20251101", large: "claude-opus-4-6" },
+		// Older 200k models → latest 1M
+		{ base: "claude-sonnet-4-20250514", large: "claude-sonnet-4-6" },
+		{ base: "claude-opus-4-20250514", large: "claude-opus-4-6" },
+		{ base: "claude-opus-4-1-20250805", large: "claude-opus-4-6" },
+		{ base: "claude-sonnet-4-0", large: "claude-sonnet-4-6" },
+		{ base: "claude-opus-4-0", large: "claude-opus-4-6" },
+		{ base: "claude-opus-4-1", large: "claude-opus-4-6" },
 	];
 
-	for (const { base, target } of anthropicFamilies) {
-		pairs.push({ basePattern: base, targetId: target, provider: "anthropic" });
+	for (const { base, large } of anthropicPairs) {
+		pairs.push({ baseId: base, largeId: large, provider: "anthropic" });
 	}
 
 	// --- AWS Bedrock ---
 	const bedrockPrefixes = ["", "us.", "eu.", "global."];
 
-	const bedrockFamilies: Array<{ base: string; target: string }> = [
-		// Sonnet 4.5 → Sonnet 4.6
-		{ base: "anthropic.claude-sonnet-4-5-20250929-v1:0", target: "anthropic.claude-sonnet-4-6" },
-		// Opus 4.5 → Opus 4.6
-		{ base: "anthropic.claude-opus-4-5-20251101-v1:0", target: "anthropic.claude-opus-4-6-v1" },
-		// Sonnet 4 → Sonnet 4.6
-		{ base: "anthropic.claude-sonnet-4-20250514-v1:0", target: "anthropic.claude-sonnet-4-6" },
-		// Opus 4 → Opus 4.6
-		{ base: "anthropic.claude-opus-4-20250514-v1:0", target: "anthropic.claude-opus-4-6-v1" },
-		// Opus 4.1 → Opus 4.6
-		{ base: "anthropic.claude-opus-4-1-20250805-v1:0", target: "anthropic.claude-opus-4-6-v1" },
+	const bedrockPairs: Array<{ base: string; large: string }> = [
+		{ base: "anthropic.claude-sonnet-4-5-20250929-v1:0", large: "anthropic.claude-sonnet-4-6" },
+		{ base: "anthropic.claude-opus-4-5-20251101-v1:0", large: "anthropic.claude-opus-4-6-v1" },
+		{ base: "anthropic.claude-sonnet-4-20250514-v1:0", large: "anthropic.claude-sonnet-4-6" },
+		{ base: "anthropic.claude-opus-4-20250514-v1:0", large: "anthropic.claude-opus-4-6-v1" },
+		{ base: "anthropic.claude-opus-4-1-20250805-v1:0", large: "anthropic.claude-opus-4-6-v1" },
 	];
 
 	for (const prefix of bedrockPrefixes) {
-		for (const { base, target } of bedrockFamilies) {
+		for (const { base, large } of bedrockPairs) {
 			pairs.push({
-				basePattern: `${prefix}${base}`,
-				targetId: `${prefix}${target}`,
+				baseId: `${prefix}${base}`,
+				largeId: `${prefix}${large}`,
 				provider: "amazon-bedrock",
 			});
 		}
 	}
 
 	// --- OpenRouter ---
-	const openrouterFamilies: Array<{ base: string; target: string }> = [
-		{ base: "anthropic/claude-sonnet-4.5", target: "anthropic/claude-sonnet-4.6" },
-		{ base: "anthropic/claude-opus-4.5", target: "anthropic/claude-opus-4.6" },
-		{ base: "anthropic/claude-sonnet-4", target: "anthropic/claude-sonnet-4.6" },
-		{ base: "anthropic/claude-opus-4", target: "anthropic/claude-opus-4.6" },
-		{ base: "anthropic/claude-opus-4.1", target: "anthropic/claude-opus-4.6" },
+	const openrouterPairs: Array<{ base: string; large: string }> = [
+		{ base: "anthropic/claude-sonnet-4.5", large: "anthropic/claude-sonnet-4.6" },
+		{ base: "anthropic/claude-opus-4.5", large: "anthropic/claude-opus-4.6" },
+		{ base: "anthropic/claude-sonnet-4", large: "anthropic/claude-sonnet-4.6" },
+		{ base: "anthropic/claude-opus-4", large: "anthropic/claude-opus-4.6" },
+		{ base: "anthropic/claude-opus-4.1", large: "anthropic/claude-opus-4.6" },
 	];
 
-	for (const { base, target } of openrouterFamilies) {
-		pairs.push({ basePattern: base, targetId: target, provider: "openrouter" });
+	for (const { base, large } of openrouterPairs) {
+		pairs.push({ baseId: base, largeId: large, provider: "openrouter" });
 	}
 
 	return pairs;
@@ -119,23 +114,41 @@ function buildModelPairs(): ModelPair[] {
 
 const MODEL_PAIRS = buildModelPairs();
 
+/**
+ * Look up a model pair given any model ID (base or large) and provider.
+ * Returns the pair if found, or undefined.
+ */
+function findPair(
+	modelId: string,
+	provider: string,
+): { pair: ModelPair; selectedSide: "base" | "large" } | undefined {
+	for (const pair of MODEL_PAIRS) {
+		if (pair.provider !== provider) continue;
+		if (modelId === pair.baseId) return { pair, selectedSide: "base" };
+		if (modelId === pair.largeId) return { pair, selectedSide: "large" };
+	}
+	return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 interface HybridState {
-	/** Whether we've already switched to the 1M model this session */
+	/** Whether we've already escalated to the 1M model this session */
 	switched: boolean;
-	/** The base model ID we started on (before any switch) */
+	/** The 200k base model ID we run on until threshold */
 	baseModelId: string | undefined;
-	/** The base model's provider */
-	baseProvider: string | undefined;
-	/** The 1M target model ID */
-	targetModelId: string | undefined;
-	/** The base model's context window size */
+	/** The 1M model ID we escalate to */
+	largeModelId: string | undefined;
+	/** Provider for both models */
+	provider: string | undefined;
+	/** Context window of the base model (the ceiling we monitor) */
 	baseContextWindow: number | undefined;
 	/** Switch threshold as a fraction (0.0 – 1.0) */
 	threshold: number;
+	/** The model ID the user originally selected (before any swap) */
+	userSelectedId: string | undefined;
 }
 
 const CUSTOM_TYPE = "hybrid-context-state";
@@ -144,28 +157,6 @@ const DEFAULT_THRESHOLD = 0.9;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Find the 1M target model ID for a given base model.
- */
-function findTargetModel(
-	modelId: string,
-	provider: string,
-): { targetId: string; provider: string } | undefined {
-	for (const pair of MODEL_PAIRS) {
-		if (pair.provider === provider && modelId === pair.basePattern) {
-			return { targetId: pair.targetId, provider: pair.provider };
-		}
-	}
-	return undefined;
-}
-
-/**
- * Check if a model is already a 1M context model (i.e., it's a target, not a base).
- */
-function isAlready1MModel(modelId: string): boolean {
-	return MODEL_PAIRS.some((pair) => pair.targetId === modelId);
-}
 
 function formatTokens(tokens: number): string {
 	if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
@@ -185,36 +176,40 @@ export default function (pi: ExtensionAPI) {
 	let state: HybridState = {
 		switched: false,
 		baseModelId: undefined,
-		baseProvider: undefined,
-		targetModelId: undefined,
+		largeModelId: undefined,
+		provider: undefined,
 		baseContextWindow: undefined,
 		threshold: DEFAULT_THRESHOLD,
+		userSelectedId: undefined,
 	};
+
+	/** Flag to suppress re-entrance when we call pi.setModel() ourselves. */
+	let selfSwitch = false;
 
 	// -----------------------------------------------------------------------
 	// Restore state from session
 	// -----------------------------------------------------------------------
 	pi.on("session_start", async (_event, ctx) => {
-		// Reset state
 		state = {
 			switched: false,
 			baseModelId: undefined,
-			baseProvider: undefined,
-			targetModelId: undefined,
+			largeModelId: undefined,
+			provider: undefined,
 			baseContextWindow: undefined,
 			threshold: DEFAULT_THRESHOLD,
+			userSelectedId: undefined,
 		};
 
-		// Restore from session entries
 		for (const entry of ctx.sessionManager.getEntries()) {
 			if (entry.type === "custom" && entry.customType === CUSTOM_TYPE) {
 				const data = entry.data as Partial<HybridState>;
 				if (data.switched !== undefined) state.switched = data.switched;
 				if (data.baseModelId !== undefined) state.baseModelId = data.baseModelId;
-				if (data.baseProvider !== undefined) state.baseProvider = data.baseProvider;
-				if (data.targetModelId !== undefined) state.targetModelId = data.targetModelId;
+				if (data.largeModelId !== undefined) state.largeModelId = data.largeModelId;
+				if (data.provider !== undefined) state.provider = data.provider;
 				if (data.baseContextWindow !== undefined) state.baseContextWindow = data.baseContextWindow;
 				if (data.threshold !== undefined) state.threshold = data.threshold;
+				if (data.userSelectedId !== undefined) state.userSelectedId = data.userSelectedId;
 			}
 		}
 
@@ -227,51 +222,87 @@ export default function (pi: ExtensionAPI) {
 	pi.on("model_select", async (event, ctx) => {
 		const { model, source } = event;
 
-		// If restoring a session and we already switched, don't re-evaluate
-		if (source === "restore" && state.switched) {
+		// Ignore model_select events that we triggered ourselves
+		if (selfSwitch) return;
+
+		// If restoring a session and we already have state, don't re-evaluate
+		if (source === "restore" && state.baseModelId) {
 			updateStatus(ctx);
 			return;
 		}
 
-		// If user manually selects a model, re-evaluate the pair
-		// (unless they selected the 1M model we already switched to)
-		if (state.switched && model.id === state.targetModelId) {
+		// Look up the pair for whatever model the user selected
+		const match = findPair(model.id, model.provider);
+
+		if (!match) {
+			// Not a supported model — clear hybrid state
+			state.switched = false;
+			state.baseModelId = undefined;
+			state.largeModelId = undefined;
+			state.provider = undefined;
+			state.baseContextWindow = undefined;
+			state.userSelectedId = undefined;
 			updateStatus(ctx);
 			return;
 		}
 
-		// Reset switch state when user selects a new base model
+		const { pair, selectedSide } = match;
+
 		state.switched = false;
+		state.baseModelId = pair.baseId;
+		state.largeModelId = pair.largeId;
+		state.provider = pair.provider;
+		state.userSelectedId = model.id;
 
-		// Check if this model has a 1M target
-		const target = findTargetModel(model.id, model.provider);
+		if (selectedSide === "large") {
+			// User selected the 1M model — drop down to the 200k base immediately
+			const baseModel = ctx.modelRegistry.find(pair.provider, pair.baseId);
+			if (baseModel) {
+				state.baseContextWindow = baseModel.contextWindow;
 
-		if (target) {
-			state.baseModelId = model.id;
-			state.baseProvider = model.provider;
-			state.targetModelId = target.targetId;
+				selfSwitch = true;
+				const ok = await pi.setModel(baseModel);
+				selfSwitch = false;
+
+				if (ok) {
+					if (source !== "restore") {
+						ctx.ui.notify(
+							`🔀 Hybrid context: starting on ${pair.baseId} (200k), will switch to ${pair.largeId} (1M) at ${formatPercent(state.threshold)}`,
+							"info",
+						);
+					}
+				} else {
+					// Can't switch to base — just stay on 1M, no hybrid
+					ctx.ui.notify(
+						`⚠️ Hybrid context: no API key for base model "${pair.baseId}". Staying on 1M.`,
+						"warning",
+					);
+					state.switched = true;
+				}
+			} else {
+				// Base model not found — stay on 1M
+				state.baseContextWindow = model.contextWindow;
+				state.switched = true;
+				if (source !== "restore") {
+					ctx.ui.notify(
+						`⚠️ Hybrid context: base model "${pair.baseId}" not found. Staying on 1M.`,
+						"warning",
+					);
+				}
+			}
+		} else {
+			// User selected the 200k base model — just monitor
 			state.baseContextWindow = model.contextWindow;
 
 			if (source !== "restore") {
 				ctx.ui.notify(
-					`🔀 Hybrid context active: will switch to 1M at ${formatPercent(state.threshold)}`,
+					`🔀 Hybrid context active: will switch to ${pair.largeId} (1M) at ${formatPercent(state.threshold)}`,
 					"info",
 				);
 			}
-		} else if (isAlready1MModel(model.id)) {
-			// User selected a 1M model directly — no hybrid needed
-			state.baseModelId = undefined;
-			state.baseProvider = undefined;
-			state.targetModelId = undefined;
-			state.baseContextWindow = undefined;
-		} else {
-			// Not a supported model
-			state.baseModelId = undefined;
-			state.baseProvider = undefined;
-			state.targetModelId = undefined;
-			state.baseContextWindow = undefined;
 		}
 
+		pi.appendEntry(CUSTOM_TYPE, { ...state });
 		updateStatus(ctx);
 	});
 
@@ -279,8 +310,7 @@ export default function (pi: ExtensionAPI) {
 	// Monitor context usage after each turn
 	// -----------------------------------------------------------------------
 	pi.on("turn_end", async (_event, ctx) => {
-		// Nothing to do if already switched or no target configured
-		if (state.switched || !state.targetModelId || !state.baseContextWindow) {
+		if (state.switched || !state.largeModelId || !state.baseContextWindow) {
 			updateStatus(ctx);
 			return;
 		}
@@ -289,11 +319,8 @@ export default function (pi: ExtensionAPI) {
 		if (!usage) return;
 
 		const ratio = usage.tokens / state.baseContextWindow;
-
-		// Update status bar with current usage
 		updateStatus(ctx, usage.tokens);
 
-		// Check threshold
 		if (ratio >= state.threshold) {
 			await performSwitch(ctx, usage.tokens);
 		}
@@ -306,35 +333,36 @@ export default function (pi: ExtensionAPI) {
 		ctx: Parameters<Parameters<typeof pi.on>[1]>[1],
 		currentTokens: number,
 	) {
-		if (!state.targetModelId || !state.baseProvider) return;
+		if (!state.largeModelId || !state.provider) return;
 
-		const targetModel = ctx.modelRegistry.find(state.baseProvider, state.targetModelId);
-		if (!targetModel) {
+		const largeModel = ctx.modelRegistry.find(state.provider, state.largeModelId);
+		if (!largeModel) {
 			ctx.ui.notify(
-				`⚠️ Hybrid context: 1M model "${state.targetModelId}" not found. Continuing on current model.`,
+				`⚠️ Hybrid context: 1M model "${state.largeModelId}" not found. Continuing on current model.`,
 				"warning",
 			);
 			return;
 		}
 
-		const success = await pi.setModel(targetModel);
+		selfSwitch = true;
+		const success = await pi.setModel(largeModel);
+		selfSwitch = false;
+
 		if (!success) {
 			ctx.ui.notify(
-				`⚠️ Hybrid context: no API key for 1M model "${state.targetModelId}". Continuing on current model.`,
+				`⚠️ Hybrid context: no API key for 1M model "${state.largeModelId}". Continuing on current model.`,
 				"warning",
 			);
 			return;
 		}
 
 		state.switched = true;
-
-		// Persist state
 		pi.appendEntry(CUSTOM_TYPE, { ...state });
 
 		const fromTokens = formatTokens(currentTokens);
 		const fromWindow = formatTokens(state.baseContextWindow!);
 		ctx.ui.notify(
-			`🔀 Hybrid context: switched to 1M model (was ${fromTokens}/${fromWindow})`,
+			`🔀 Switched to 1M context (was ${fromTokens}/${fromWindow}). Model: ${state.largeModelId}`,
 			"info",
 		);
 
@@ -379,7 +407,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			if (!state.baseModelId) {
 				ctx.ui.notify(
-					"Hybrid context is not active. Select a supported Anthropic model (e.g., claude-sonnet-4-5).",
+					"Hybrid context is not active. Select a supported Anthropic model (e.g., claude-sonnet-4-5 or claude-opus-4-6).",
 					"info",
 				);
 				return;
@@ -390,12 +418,12 @@ export default function (pi: ExtensionAPI) {
 			const ratio = state.baseContextWindow ? tokens / state.baseContextWindow : 0;
 
 			let msg = `🔀 Hybrid Context Status\n`;
-			msg += `  Base model:     ${state.baseModelId}\n`;
-			msg += `  1M target:      ${state.targetModelId}\n`;
-			msg += `  Context window: ${formatTokens(state.baseContextWindow ?? 0)}\n`;
+			msg += `  User selected:  ${state.userSelectedId}\n`;
+			msg += `  Base model:     ${state.baseModelId} (${formatTokens(state.baseContextWindow ?? 0)})\n`;
+			msg += `  1M model:       ${state.largeModelId}\n`;
 			msg += `  Current usage:  ${formatTokens(tokens)} (${formatPercent(ratio)})\n`;
 			msg += `  Threshold:      ${formatPercent(state.threshold)}\n`;
-			msg += `  Switched:       ${state.switched ? "Yes ✓" : "No — waiting"}`;
+			msg += `  Switched:       ${state.switched ? "Yes ✓ (on 1M)" : "No — running on base"}`;
 
 			ctx.ui.notify(msg, "info");
 		},
