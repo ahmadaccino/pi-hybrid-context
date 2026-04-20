@@ -1,0 +1,20 @@
+{
+  "name": "pi-hybrid-context",
+  "version": "1.0.0",
+  "description": "Pi extension for hybrid context — start on a standard context window model, auto-switch to 1M context when approaching the limit",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "author": "Ahmad",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AhmadMayo/pi-hybrid-context"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@sinclair/typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions/index.ts"]
+  }
+}
